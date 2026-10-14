@@ -1,6 +1,15 @@
+# Environment and secrets
 .env
 venv/
+
+# Python
 __pycache__/
 *.pyc
+
+# Chroma database
 chroma_db/
+chroma_test_db/
+
+# Parent document storage
 parent_docs_store/
+parent_docs_test_store/
