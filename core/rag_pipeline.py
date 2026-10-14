@@ -1,127 +1,60 @@
 import os
+import unicodedata
 from dotenv import load_dotenv
 from google import genai
 
 from core.ytb_process import search_youtube_videos
 
 load_dotenv()
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY"),
-    http_options={"timeout": 30000}
-)
-
-# Chroma distance: smaller = more similar.
-NGUONG_LIEN_QUAN = 0.72
-
-
-def _youtube_fallback(query):
-    try:
-        videos = search_youtube_videos(query)
-
-        return {
-            "type": "youtube_fallback",
-            "message": (
-                "Mình chưa tìm thấy thông tin phù hợp trong tài liệu "
-                "hoặc Gemini hiện không khả dụng. "
-                "Dưới đây là một số video YouTube có thể giúp bạn:"
-            ),
-            "videos": videos,
-        }
-
-    except Exception as e:
-        return {
-            "type": "error",
-            "message": (
-                "Gemini hiện không khả dụng và cũng không thể tải "
-                "video YouTube. Vui lòng thử lại sau."
-            ),
-            "error": str(e),
-        }
+STOP_WORDS = {
+    "là", "gì", "của", "và", "các", "những", "về", "có", "không",
+    "ai", "một", "này", "đó", "cho", "được", "khi", "như", "để",
+    "trong", "với", "đã", "sẽ", "đang", "nào", "sao", "thì", "mà"
+}
 
 
-def answer_question(vector_store, query):
-    try:
-        results = vector_store.similarity_search_with_score(
-            query,
-            k=2
-        )
-
-    except Exception as e:
-        return {
-            "type": "error",
-            "message": (
-                " Không thể tìm kiếm trong tài liệu hiện tại. "
-                "Vui lòng thử lại sau."
-            ),
-            "error": str(e),
-        }
-
-    if not results:
-        print(" KHÔNG TÌM THẤY TÀI LIỆU")
-        return _youtube_fallback(query)
-
-    # Chroma distance: smaller = more similar
-    best_score = results[0][1]
-
-    print("QUERY:", query)
-    print("BEST SCORE:", best_score)
-    print(
-        "TOP DOCUMENT:",
-        results[0][0].page_content[:200]
-    )
+def normalize_text(text):
+    return unicodedata.normalize('NFC', text)
 
 
-    if best_score >= NGUONG_LIEN_QUAN:
+def answer_question(retriever, vector_store, query):
+    child_results = vector_store.similarity_search_with_score(query, k=2)
 
-        print("⚠️ CÂU HỎI KHÔNG LIÊN QUAN ĐẾN TÀI LIỆU")
-        print("🎥 CHUYỂN SANG YOUTUBE")
+    is_relevant = False
+    if child_results:
+        top_content = normalize_text(child_results[0][0].page_content.lower())
+        query_words = [normalize_text(w) for w in query.lower().split() if len(w) > 2 and w not in STOP_WORDS]
+        matched_words = [w for w in query_words if w in top_content]
+        is_relevant = len(matched_words) > 0
 
-        return _youtube_fallback(query)
+    if is_relevant:
+        parent_docs = retriever.invoke(query)
+        context = "\n\n".join([doc.page_content for doc in parent_docs[:2]])
 
+        prompt = f"""Dựa vào tài liệu sau, trả lời câu hỏi của học sinh một cách rõ ràng, dễ hiểu.
 
-    context = "\n\n".join(
-        doc.page_content
-        for doc, score in results
-    )
-
-    prompt = f"""
-Dựa vào tài liệu sau, hãy trả lời câu hỏi của học sinh
-một cách rõ ràng, dễ hiểu.
-
-Chỉ sử dụng thông tin có trong tài liệu.
-Nếu tài liệu không cung cấp đủ thông tin để trả lời,
-hãy nói rõ rằng tài liệu không có đủ thông tin.
-
-TÀI LIỆU:
+Tài liệu:
 {context}
 
-CÂU HỎI:
-{query}
+Câu hỏi: {query}
 """
-
-    print(" ĐÃ TÌM THẤY TÀI LIỆU")
-    print(" ĐANG GỌI GEMINI...")
-
-    try:
-
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
         )
 
-        print(" GEMINI TRẢ LỜI THÀNH CÔNG")
-
         return {
             "type": "rag_answer",
             "answer": response.text,
-            "source": "Dựa trên tài liệu bạn đã upload",
+            "source": "Dựa trên tài liệu bạn đã upload"
         }
+    else:
+        videos = search_youtube_videos(query)
 
-    except Exception as e:
-
-        print(" GEMINI LỖI:", type(e).__name__)
-        print(" CHI TIẾT:", e)
-        print(" CHUYỂN SANG YOUTUBE")
-
-        return _youtube_fallback(query)
+        return {
+            "type": "youtube_fallback",
+            "message": "Mình chưa có tài liệu về chủ đề này. Đây là vài video bài giảng có thể giúp bạn:",
+            "videos": videos
+        }
